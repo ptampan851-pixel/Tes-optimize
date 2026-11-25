@@ -110,7 +110,7 @@
 +        else if (ok && r == VK_SUCCESS && p) prof_async_success_.fetch_add(1, std::memory_order_relaxed);
 +        else prof_async_failed_.fetch_add(1, std::memory_order_relaxed);
      }
-@@ -12021,4 +12072,35 @@
+@@ -12021,4 +12072,34 @@
                  static_cast<unsigned long long>(prof_warm_waits_), warm_ready);
 +        const uint64_t async_jobs = prof_async_jobs_.exchange(0, std::memory_order_relaxed);
 +        const uint64_t async_wait_ns = prof_async_queue_wait_ns_.exchange(0, std::memory_order_relaxed);
