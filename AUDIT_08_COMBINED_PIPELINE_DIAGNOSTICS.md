@@ -10,7 +10,7 @@ The separate routing and async diagnostic patch files were useful review artifac
 
 It combines:
 - Synchronous/async pipeline routing counters and fallback reason counters.
-- Async job enqueue timestamp and queue wait measurement.
+- Async job enqueue timestamp and queue wait measurement, with a dedicated sample counter so in-flight jobs do not skew the average.
 - Driver pipeline-creation duration measured only after acquiring `pipeline_cache_lock_`.
 - Completed, successful, failed, and abandoned job counts.
 - Periodic reporting through the existing `profile_frame()` report.
@@ -20,7 +20,7 @@ It combines:
 - Regenerated from the uploaded `mhrise-recomp-1.0.121.zip` source.
 - Applied to a fresh extraction with `patch --dry-run -p1`: passed.
 - Applied to a second fresh extraction: passed.
-- Confirmed the resulting source contains the async and routing report statements and the queue timestamp/counter fields.
+- Confirmed the resulting source contains the async and routing report statements, queue timestamp, queue-wait sample counter, and dedicated average denominator.
 - No Android NDK compilation, APK build, device runtime test, or thermal test has been performed.
 
 ## Usage
