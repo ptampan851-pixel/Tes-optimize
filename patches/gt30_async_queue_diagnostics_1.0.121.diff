@@ -1,0 +1,79 @@
+--- a/runtime/src/nnsdk/nvn/executor.cpp
++++ b/runtime/src/nnsdk/nvn/executor.cpp
+@@ -2392,6 +2392,7 @@
+         uint64_t inputs = 0;
+         VkPipelineLayout layout = VK_NULL_HANDLE;  // los layouts y render passes del ejecutor no se destruyen
+         VkRenderPass rp = VK_NULL_HANDLE;
++        std::chrono::steady_clock::time_point queued_at{};
+     };
+     std::mutex async_mutex_;
+     std::condition_variable async_cv_;
+@@ -2405,7 +2406,13 @@
+     bool serial_pipelines_ = false;                         // init: PowerVR (o single_thread_pipelines), todo en este hilo
+     bool low_table_ = true;                                 // read_flags: la tabla baja de c2 (resolve_texture)
+     bool separate_tables_ = true;  // read_flags (<datos>/no_split_tables: un array, como antes): StageBindings::combined_textures
+-    std::atomic<uint64_t> prof_async_ns_{0};                // driver en los hilos (para pipelines.bin y el log)
++    std::atomic<uint64_t> prof_async_ns_{0};                // tiempo dentro del driver al crear pipelines en segundo plano
++    std::atomic<uint64_t> prof_async_queue_wait_ns_{0};
++    std::atomic<uint64_t> prof_async_jobs_{0};
++    std::atomic<uint64_t> prof_async_driver_calls_{0};
++    std::atomic<uint64_t> prof_async_success_{0};
++    std::atomic<uint64_t> prof_async_failed_{0};
++    std::atomic<uint64_t> prof_async_abandoned_{0};
+     void async_loop();
+     std::vector<PipelineRecord> load_pipeline_records();
+     // Registros de pipelines nuevas para <datos>/pipelines_estado.bin: se añaden desde otro hilo (save_pipeline_records).
+@@ -7432,6 +7439,7 @@
+         job.inputs = inputs;
+         job.layout = l.pipeline;
+         job.rp = rp;
++        job.queued_at = std::chrono::steady_clock::now();
+         if (!async_started_) {
+             async_started_ = true;
+             // Pipeline worker threads (Settings → Performance, like Eden's): 2 by default; more build new effects' pipelines
+@@ -11522,6 +11530,9 @@
+             job = async_queue_.front();
+             async_queue_.pop_front();
+         }
++        const uint64_t queue_wait_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
++            std::chrono::steady_clock::now() - job.queued_at).count());
++        prof_async_queue_wait_ns_.fetch_add(queue_wait_ns, std::memory_order_relaxed);
+         VkShaderModule modules[kStages] = {};
+         nvnshader::Translated translated[kStages];  // (si el driver la rechaza, su SPIR-V a pipelines_fallidas)
+         bool ok = true;
+@@ -11571,7 +11582,14 @@
+             p = VK_NULL_HANDLE;
+         }
+         if (p) record_pipeline(job.rec);
+-        if (ok) prof_async_ns_.fetch_add(ns, std::memory_order_relaxed);
++        prof_async_jobs_.fetch_add(1, std::memory_order_relaxed);
++        if (ok) {
++            prof_async_ns_.fetch_add(ns, std::memory_order_relaxed);
++            prof_async_driver_calls_.fetch_add(1, std::memory_order_relaxed);
++        }
++        if (abandoned) prof_async_abandoned_.fetch_add(1, std::memory_order_relaxed);
++        else if (ok && r == VK_SUCCESS && p) prof_async_success_.fetch_add(1, std::memory_order_relaxed);
++        else prof_async_failed_.fetch_add(1, std::memory_order_relaxed);
+     }
+ }
+ 
+@@ -12052,6 +12070,20 @@
+                 "esperas, %zu creadas sin pedir aún\n",
+                 pipelines_.size(), prof_stage_keys_.size(), static_cast<unsigned long long>(prof_warm_taken_),
+                 static_cast<unsigned long long>(prof_warm_waits_), warm_ready);
++        const uint64_t async_jobs = prof_async_jobs_.exchange(0, std::memory_order_relaxed);
++        const uint64_t async_wait_ns = prof_async_queue_wait_ns_.exchange(0, std::memory_order_relaxed);
++        const uint64_t async_driver_ns = prof_async_ns_.exchange(0, std::memory_order_relaxed);
++        const uint64_t async_driver_calls = prof_async_driver_calls_.exchange(0, std::memory_order_relaxed);
++        const uint64_t async_success = prof_async_success_.exchange(0, std::memory_order_relaxed);
++        const uint64_t async_failed = prof_async_failed_.exchange(0, std::memory_order_relaxed);
++        const uint64_t async_abandoned = prof_async_abandoned_.exchange(0, std::memory_order_relaxed);
++        NVN_LOG("perfil pipelines async: %llu jobs; espera cola media %.2f ms; driver medio %.2f ms (%llu llamadas); "
++                "%llu correctas, %llu fallidas, %llu abandonadas\\n",
++                static_cast<unsigned long long>(async_jobs),
++                async_jobs ? async_wait_ns / 1e6 / double(async_jobs) : 0.0,
++                async_driver_calls ? async_driver_ns / 1e6 / double(async_driver_calls) : 0.0,
++                static_cast<unsigned long long>(async_driver_calls), static_cast<unsigned long long>(async_success),
++                static_cast<unsigned long long>(async_failed), static_cast<unsigned long long>(async_abandoned));
+         prof_pipelines_logged_ = pipelines_created_;
+         prof_pipeline_us_ = 0;
