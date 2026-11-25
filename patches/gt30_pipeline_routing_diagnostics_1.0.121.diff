@@ -1,41 +1,99 @@
 --- a/runtime/src/nnsdk/nvn/executor.cpp
 +++ b/runtime/src/nnsdk/nvn/executor.cpp
-@@ -1618,6 +1618,10 @@
+@@ -1616,6 +1616,11 @@
+     bool dynamic_valid_ = false;
+     uint64_t descriptor_epoch_ = 1;  // cambia en cada begin(): los sets recordados por los layouts caducan
      uint64_t pipelines_created_ = 0, pipelines_saved_ = 0, last_pipeline_frame_ = 0;
++    // Perfil de rutas de creación de pipelines. Atómicos por seguridad entre hilos.
++    std::atomic<uint64_t> prof_pipe_async_queued_{0}, prof_pipe_sync_total_{0}, prof_pipe_sync_disabled_{0},
++        prof_pipe_sync_per_stage_{0}, prof_pipe_sync_skip_gs_{0}, prof_pipe_sync_nonrecurring_{0},
++        prof_pipe_sync_retry_{0}, prof_pipe_sync_known_{0}, prof_pipe_sync_unrecordable_{0},
++        prof_pipe_unrec_count_check_{0}, prof_pipe_unrec_base_key_{0}, prof_pipe_unrec_variant_key_{0};
+     // Perfil: pipelines creadas desde el último informe y lo que tardó el driver (en NvnSubmit, con el frame parado).
      uint64_t prof_pipelines_logged_ = 0, prof_pipeline_us_ = 0;
-+    uint64_t prof_pipe_async_queued_ = 0, prof_pipe_sync_disabled_ = 0, prof_pipe_sync_per_stage_ = 0,
-+             prof_pipe_sync_skip_gs_ = 0, prof_pipe_sync_nonrecurring_ = 0, prof_pipe_sync_retry_ = 0,
-+             prof_pipe_sync_unrecordable_ = 0, prof_pipe_sync_known_ = 0;
-@@ -7410,6 +7414,17 @@
-         recordable &= (v.cache_key.a | v.cache_key.b) != 0;
+     std::unordered_map<uint64_t, uint64_t> prof_mirror_top_;  // perfil: bytes subidos por espejo (su dirección)
+@@ -7359,11 +7364,17 @@
+     PipelineRecord rec;
+     memset(&rec, 0, sizeof rec);
+     // (not with the draw count check: the warm-up builds from the SPIR-V cache, which keeps the stage without it)
+-    bool recordable = !(st_.stages[static_cast<int>(Stage::Vertex)] && st_.stages[static_cast<int>(Stage::Vertex)]->count_check);
++    const bool unrec_count_check =
++        st_.stages[static_cast<int>(Stage::Vertex)] && st_.stages[static_cast<int>(Stage::Vertex)]->count_check;
++    bool unrec_base_key = false;
++    bool unrec_variant_key = false;
++    bool recordable = !unrec_count_check;
+     for (int s = 0; s < kStages; s++) {
+         if (!st_.stages[s] || s == static_cast<int>(Stage::Compute)) continue;
+         rec.base[s] = st_.stages[s]->cache_key;
+-        recordable &= (st_.stages[s]->cache_key.a | st_.stages[s]->cache_key.b) != 0;
++        const bool base_key_valid = (st_.stages[s]->cache_key.a | st_.stages[s]->cache_key.b) != 0;
++        unrec_base_key |= !base_key_valid;
++        recordable &= base_key_valid;
+         if (key.skip_gs && s == static_cast<int>(Stage::Geometry)) continue;
+         ProgramStage::Variant v{st_.stages[s]->module, st_.stages[s]->spirv_id, st_.stages[s]->cache_key};
+         if (s == static_cast<int>(Stage::Vertex) && input_types) {
+@@ -7407,7 +7418,9 @@
+         }
+         modules[s] = v.module;
+         rec.module[s] = v.cache_key;
+-        recordable &= (v.cache_key.a | v.cache_key.b) != 0;
++        const bool variant_key_valid = (v.cache_key.a | v.cache_key.b) != 0;
++        unrec_variant_key |= !variant_key_valid;
++        recordable &= variant_key_valid;
      }
  
-+    if (async_on) {
-+        if (known && !retry && !async) prof_pipe_sync_known_++;
-+        else if (retry) prof_pipe_sync_retry_++;
-+        else if (!rp_recurring_) prof_pipe_sync_nonrecurring_++;
-+        else if (!recordable) prof_pipe_sync_unrecordable_++;
-+        else prof_pipe_async_queued_++;
-+    } else if (!async_pipelines_) prof_pipe_sync_disabled_++;
-+    else if (per_stage_keys_) prof_pipe_sync_per_stage_++;
-+    else if (key.skip_gs) prof_pipe_sync_skip_gs_++;
-+
      if (async && !retry && recordable) {
-         AsyncJob job;
-         job.h = h;
-@@ -12019,6 +12034,18 @@
-                 "esperas, %zu creadas sin pedir aún\n",
-                 pipelines_.size(), prof_stage_keys_.size(), static_cast<unsigned long long>(prof_warm_taken_),
+@@ -7433,11 +7446,31 @@
+             async_pending_.insert(h);
+             async_queue_.push_back(job);
+         }
++        prof_pipe_async_queued_.fetch_add(1, std::memory_order_relaxed);
+         hud::shader_queued();
+         async_cv_.notify_one();
+         g_drop_stats.pipelines_async.fetch_add(1, std::memory_order_relaxed);
+         g_drop_stats.draws_skipped.fetch_add(1, std::memory_order_relaxed);
+         return VK_NULL_HANDLE;
++    }
++    prof_pipe_sync_total_.fetch_add(1, std::memory_order_relaxed);
++    if (known && !retry) {
++        prof_pipe_sync_known_.fetch_add(1, std::memory_order_relaxed);
++    } else if (retry) {
++        prof_pipe_sync_retry_.fetch_add(1, std::memory_order_relaxed);
++    } else if (!async_pipelines_) {
++        prof_pipe_sync_disabled_.fetch_add(1, std::memory_order_relaxed);
++    } else if (per_stage_keys_) {
++        prof_pipe_sync_per_stage_.fetch_add(1, std::memory_order_relaxed);
++    } else if (key.skip_gs) {
++        prof_pipe_sync_skip_gs_.fetch_add(1, std::memory_order_relaxed);
++    } else if (!rp_recurring_) {
++        prof_pipe_sync_nonrecurring_.fetch_add(1, std::memory_order_relaxed);
++    } else if (!recordable) {
++        prof_pipe_sync_unrecordable_.fetch_add(1, std::memory_order_relaxed);
++        if (unrec_count_check) prof_pipe_unrec_count_check_.fetch_add(1, std::memory_order_relaxed);
++        if (unrec_base_key) prof_pipe_unrec_base_key_.fetch_add(1, std::memory_order_relaxed);
++        if (unrec_variant_key) prof_pipe_unrec_variant_key_.fetch_add(1, std::memory_order_relaxed);
+     }
+     VkPipeline p = VK_NULL_HANDLE;
+     const auto created_at = std::chrono::steady_clock::now();
+@@ -12021,6 +12054,21 @@
                  static_cast<unsigned long long>(prof_warm_waits_), warm_ready);
-+        NVN_LOG("pipeline routing: async queued %llu | sync disabled %llu | per-stage %llu | skip-GS %llu | "
-+                "non-recurring %llu | retry/abandoned %llu | unrecordable %llu | known-sync %llu\n",
-+                static_cast<unsigned long long>(prof_pipe_async_queued_),
-+                static_cast<unsigned long long>(prof_pipe_sync_disabled_),
-+                static_cast<unsigned long long>(prof_pipe_sync_per_stage_),
-+                static_cast<unsigned long long>(prof_pipe_sync_skip_gs_),
-+                static_cast<unsigned long long>(prof_pipe_sync_nonrecurring_),
-+                static_cast<unsigned long long>(prof_pipe_sync_retry_),
-+                static_cast<unsigned long long>(prof_pipe_sync_unrecordable_),
-+                static_cast<unsigned long long>(prof_pipe_sync_known_));
-+        prof_pipe_async_queued_ = prof_pipe_sync_disabled_ = prof_pipe_sync_per_stage_ = prof_pipe_sync_skip_gs_ =
-+            prof_pipe_sync_nonrecurring_ = prof_pipe_sync_retry_ = prof_pipe_sync_unrecordable_ = prof_pipe_sync_known_ = 0;
+         prof_pipelines_logged_ = pipelines_created_;
+         prof_pipeline_us_ = 0;
++        NVN_LOG("pipeline routing: async queued %llu | sync total %llu (disabled %llu, per-stage %llu, skip-GS %llu, "
++                "non-recurring %llu, retry %llu, known %llu, unrecordable %llu [count-check %llu, base-key %llu, "
++                "variant-key %llu])\n",
++                static_cast<unsigned long long>(prof_pipe_async_queued_.exchange(0, std::memory_order_relaxed)),
++                static_cast<unsigned long long>(prof_pipe_sync_total_.exchange(0, std::memory_order_relaxed)),
++                static_cast<unsigned long long>(prof_pipe_sync_disabled_.exchange(0, std::memory_order_relaxed)),
++                static_cast<unsigned long long>(prof_pipe_sync_per_stage_.exchange(0, std::memory_order_relaxed)),
++                static_cast<unsigned long long>(prof_pipe_sync_skip_gs_.exchange(0, std::memory_order_relaxed)),
++                static_cast<unsigned long long>(prof_pipe_sync_nonrecurring_.exchange(0, std::memory_order_relaxed)),
++                static_cast<unsigned long long>(prof_pipe_sync_retry_.exchange(0, std::memory_order_relaxed)),
++                static_cast<unsigned long long>(prof_pipe_sync_known_.exchange(0, std::memory_order_relaxed)),
++                static_cast<unsigned long long>(prof_pipe_sync_unrecordable_.exchange(0, std::memory_order_relaxed)),
++                static_cast<unsigned long long>(prof_pipe_unrec_count_check_.exchange(0, std::memory_order_relaxed)),
++                static_cast<unsigned long long>(prof_pipe_unrec_base_key_.exchange(0, std::memory_order_relaxed)),
++                static_cast<unsigned long long>(prof_pipe_unrec_variant_key_.exchange(0, std::memory_order_relaxed)));
+     }
+     {
+         size_t written = 0, small = 0;
