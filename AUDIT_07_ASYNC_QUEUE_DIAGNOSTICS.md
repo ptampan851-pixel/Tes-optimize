@@ -30,13 +30,12 @@ Counter semantics:
 - Failed means the job was not abandoned and did not meet the success condition. It can include shader-cache/module failures or driver/pipeline failures.
 - Abandoned is reported separately and is mutually exclusive with success/failed in this report; it means the foreground submit path took over while the worker was processing the job.
 - Average queue wait is averaged across completed jobs. Jobs still waiting or processing at report time are not included.
-- Driver average is averaged only across jobs that reached the pipeline-creation call (`ok == true`).
+- Driver average is averaged only across jobs that reached `make_graphics_pipeline`. The timer starts after acquiring `pipeline_cache_lock_`, so it excludes queueing and cache-lock wait.
 
 ## Validation performed
 
 - Patch #04 was applied to a fresh extraction of `mhrise-recomp-1.0.121.zip`.
-- Patch #05 passed `patch --dry-run -p1` against that post-#04 source.
-- Both patches were then applied sequentially to a fresh extraction; the expected routing and async diagnostic log statements were present.
+- The local working extraction was inspected and contains the expected instrumentation. The exact GitHub patch files have not yet been independently re-applied in a clean-room test; re-run sequential patch application before treating them as release-ready.
 - SHA-256 of patch #05: `baf04a027b98907026275140b81c050640f3ed0d5fc9f37dfc4a082dd89f7dd9`.
 
 ## Runtime collection
