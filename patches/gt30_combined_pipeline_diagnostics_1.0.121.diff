@@ -12,11 +12,12 @@
          VkRenderPass rp = VK_NULL_HANDLE;
 +        std::chrono::steady_clock::time_point queued_at{};
      };
-@@ -2402,3 +2408,9 @@
+@@ -2402,3 +2408,10 @@
      bool separate_tables_ = true;  // read_flags (<datos>/no_split_tables: un array, como antes): StageBindings::combined_textures
 -    std::atomic<uint64_t> prof_async_ns_{0};                // driver en los hilos (para pipelines.bin y el log)
 +    std::atomic<uint64_t> prof_async_ns_{0};                // async driver pipeline creation duration
 +    std::atomic<uint64_t> prof_async_queue_wait_ns_{0};
++    std::atomic<uint64_t> prof_async_queue_samples_{0};
 +    std::atomic<uint64_t> prof_async_jobs_{0};
 +    std::atomic<uint64_t> prof_async_driver_calls_{0};
 +    std::atomic<uint64_t> prof_async_success_{0};
@@ -76,11 +77,12 @@
 +        if (unrec_base_key) prof_pipe_unrec_base_key_.fetch_add(1, std::memory_order_relaxed);
 +        if (unrec_variant_key) prof_pipe_unrec_variant_key_.fetch_add(1, std::memory_order_relaxed);
      }
-@@ -11491,2 +11532,5 @@
+@@ -11491,2 +11532,6 @@
          }
 +        const uint64_t queue_wait_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
 +            std::chrono::steady_clock::now() - job.queued_at).count());
 +        prof_async_queue_wait_ns_.fetch_add(queue_wait_ns, std::memory_order_relaxed);
++        prof_async_queue_samples_.fetch_add(1, std::memory_order_relaxed);
          VkShaderModule modules[kStages] = {};
 @@ -11503,9 +11547,9 @@
          VkResult r = VK_ERROR_INITIALIZATION_FAILED;
@@ -108,10 +110,11 @@
 +        else if (ok && r == VK_SUCCESS && p) prof_async_success_.fetch_add(1, std::memory_order_relaxed);
 +        else prof_async_failed_.fetch_add(1, std::memory_order_relaxed);
      }
-@@ -12021,4 +12072,33 @@
+@@ -12021,4 +12072,35 @@
                  static_cast<unsigned long long>(prof_warm_waits_), warm_ready);
 +        const uint64_t async_jobs = prof_async_jobs_.exchange(0, std::memory_order_relaxed);
 +        const uint64_t async_wait_ns = prof_async_queue_wait_ns_.exchange(0, std::memory_order_relaxed);
++        const uint64_t async_queue_samples = prof_async_queue_samples_.exchange(0, std::memory_order_relaxed);
 +        const uint64_t async_driver_ns = prof_async_ns_.exchange(0, std::memory_order_relaxed);
 +        const uint64_t async_driver_calls = prof_async_driver_calls_.exchange(0, std::memory_order_relaxed);
 +        const uint64_t async_success = prof_async_success_.exchange(0, std::memory_order_relaxed);
@@ -120,7 +123,7 @@
 +        NVN_LOG("pipeline async: %llu jobs; avg queue wait %.2f ms; avg driver call %.2f ms (%llu calls); "
 +                "%llu success, %llu failed, %llu abandoned\n",
 +                static_cast<unsigned long long>(async_jobs),
-+                async_jobs ? async_wait_ns / 1e6 / double(async_jobs) : 0.0,
++                async_queue_samples ? async_wait_ns / 1e6 / double(async_queue_samples) : 0.0,
 +                async_driver_calls ? async_driver_ns / 1e6 / double(async_driver_calls) : 0.0,
 +                static_cast<unsigned long long>(async_driver_calls), static_cast<unsigned long long>(async_success),
 +                static_cast<unsigned long long>(async_failed), static_cast<unsigned long long>(async_abandoned));
