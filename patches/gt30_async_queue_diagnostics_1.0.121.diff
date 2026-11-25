@@ -31,21 +31,7 @@
          if (!async_started_) {
              async_started_ = true;
              // Pipeline worker threads (Settings → Performance, like Eden's): 2 by default; more build new effects' pipelines
-@@ -11500,12 +11500,13 @@
-         }
-         VkPipeline p = VK_NULL_HANDLE;
-         VkResult r = VK_ERROR_INITIALIZATION_FAILED;
--        const auto t0 = std::chrono::steady_clock::now();
-+        uint64_t ns = 0;
-         if (ok) {
-             std::shared_lock cache_lock(pipeline_cache_lock_);
-+            const auto t0 = std::chrono::steady_clock::now();
-             r = make_graphics_pipeline(job.rec.key, modules, job.inputs, job.layout, job.rp, pipeline_cache_, p);
-+            ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
-         }
--        const uint64_t ns =
--            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
-@@ -11522,6 +11530,9 @@
+@@ -11522,6 +11530,9 @@ -11500,12 +11500,13 @@
              job = async_queue_.front();
              async_queue_.pop_front();
          }
@@ -55,7 +41,7 @@
          VkShaderModule modules[kStages] = {};
          nvnshader::Translated translated[kStages];  // (si el driver la rechaza, su SPIR-V a pipelines_fallidas)
          bool ok = true;
-@@ -11571,7 +11582,14 @@
+@@ -11573,7 +11577,14 @@
              p = VK_NULL_HANDLE;
          }
          if (p) record_pipeline(job.rec);
@@ -71,7 +57,7 @@
      }
  }
  
-@@ -12052,6 +12070,20 @@
+@@ -12054,6 +12065,20 @@
                  "esperas, %zu creadas sin pedir aún\n",
                  pipelines_.size(), prof_stage_keys_.size(), static_cast<unsigned long long>(prof_warm_taken_),
                  static_cast<unsigned long long>(prof_warm_waits_), warm_ready);
