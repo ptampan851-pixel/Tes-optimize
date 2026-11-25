@@ -40,7 +40,7 @@ Counter semantics:
 
 ## Runtime collection
 
-Enable `verbose_log` or `perf_stats` so `profile_frame()` emits the profiling report. For a quicker interval, use `profile_30`; otherwise the normal interval is 300 frames. Reproduce the same route and scene for each worker setting (1, 2, 3, 4), then compare:
+Enable `perf_stats` so `profile_frame()` emits the profiling report with less extra logging overhead than `verbose_log`. Add `profile_30` for a 30-frame reporting interval; otherwise the normal interval is 300 frames. `profile_30` alone does not enable the report. Reproduce the same route and scene for each worker setting (1, 2, 3, 4), then compare:
 - Average queue wait.
 - Average driver creation time.
 - Success/failure/abandoned counts.
