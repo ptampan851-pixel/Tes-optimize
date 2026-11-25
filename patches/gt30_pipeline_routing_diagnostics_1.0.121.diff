@@ -1,0 +1,41 @@
+--- a/runtime/src/nnsdk/nvn/executor.cpp
++++ b/runtime/src/nnsdk/nvn/executor.cpp
+@@ -1618,6 +1618,10 @@
+     uint64_t pipelines_created_ = 0, pipelines_saved_ = 0, last_pipeline_frame_ = 0;
+     uint64_t prof_pipelines_logged_ = 0, prof_pipeline_us_ = 0;
++    uint64_t prof_pipe_async_queued_ = 0, prof_pipe_sync_disabled_ = 0, prof_pipe_sync_per_stage_ = 0,
++             prof_pipe_sync_skip_gs_ = 0, prof_pipe_sync_nonrecurring_ = 0, prof_pipe_sync_retry_ = 0,
++             prof_pipe_sync_unrecordable_ = 0, prof_pipe_sync_known_ = 0;
+@@ -7410,6 +7414,17 @@
+         recordable &= (v.cache_key.a | v.cache_key.b) != 0;
+     }
+ 
++    if (async_on) {
++        if (known && !retry && !async) prof_pipe_sync_known_++;
++        else if (retry) prof_pipe_sync_retry_++;
++        else if (!rp_recurring_) prof_pipe_sync_nonrecurring_++;
++        else if (!recordable) prof_pipe_sync_unrecordable_++;
++        else prof_pipe_async_queued_++;
++    } else if (!async_pipelines_) prof_pipe_sync_disabled_++;
++    else if (per_stage_keys_) prof_pipe_sync_per_stage_++;
++    else if (key.skip_gs) prof_pipe_sync_skip_gs_++;
++
+     if (async && !retry && recordable) {
+         AsyncJob job;
+         job.h = h;
+@@ -12019,6 +12034,18 @@
+                 "esperas, %zu creadas sin pedir aún\n",
+                 pipelines_.size(), prof_stage_keys_.size(), static_cast<unsigned long long>(prof_warm_taken_),
+                 static_cast<unsigned long long>(prof_warm_waits_), warm_ready);
++        NVN_LOG("pipeline routing: async queued %llu | sync disabled %llu | per-stage %llu | skip-GS %llu | "
++                "non-recurring %llu | retry/abandoned %llu | unrecordable %llu | known-sync %llu\n",
++                static_cast<unsigned long long>(prof_pipe_async_queued_),
++                static_cast<unsigned long long>(prof_pipe_sync_disabled_),
++                static_cast<unsigned long long>(prof_pipe_sync_per_stage_),
++                static_cast<unsigned long long>(prof_pipe_sync_skip_gs_),
++                static_cast<unsigned long long>(prof_pipe_sync_nonrecurring_),
++                static_cast<unsigned long long>(prof_pipe_sync_retry_),
++                static_cast<unsigned long long>(prof_pipe_sync_unrecordable_),
++                static_cast<unsigned long long>(prof_pipe_sync_known_));
++        prof_pipe_async_queued_ = prof_pipe_sync_disabled_ = prof_pipe_sync_per_stage_ = prof_pipe_sync_skip_gs_ =
++            prof_pipe_sync_nonrecurring_ = prof_pipe_sync_retry_ = prof_pipe_sync_unrecordable_ = prof_pipe_sync_known_ = 0;
