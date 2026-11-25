@@ -31,16 +31,6 @@
          if (!async_started_) {
              async_started_ = true;
              // Pipeline worker threads (Settings → Performance, like Eden's): 2 by default; more build new effects' pipelines
-@@ -11522,6 +11530,9 @@
-             job = async_queue_.front();
-             async_queue_.pop_front();
-         }
-+        const uint64_t queue_wait_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-+            std::chrono::steady_clock::now() - job.queued_at).count());
-+        prof_async_queue_wait_ns_.fetch_add(queue_wait_ns, std::memory_order_relaxed);
-         VkShaderModule modules[kStages] = {};
-         nvnshader::Translated translated[kStages];  // (si el driver la rechaza, su SPIR-V a pipelines_fallidas)
-         bool ok = true;
 @@ -11500,12 +11500,13 @@
          }
          VkPipeline p = VK_NULL_HANDLE;
@@ -55,6 +45,16 @@
          }
 -        const uint64_t ns =
 -            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+@@ -11522,6 +11530,9 @@
+             job = async_queue_.front();
+             async_queue_.pop_front();
+         }
++        const uint64_t queue_wait_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
++            std::chrono::steady_clock::now() - job.queued_at).count());
++        prof_async_queue_wait_ns_.fetch_add(queue_wait_ns, std::memory_order_relaxed);
+         VkShaderModule modules[kStages] = {};
+         nvnshader::Translated translated[kStages];  // (si el driver la rechaza, su SPIR-V a pipelines_fallidas)
+         bool ok = true;
 @@ -11571,7 +11582,14 @@
              p = VK_NULL_HANDLE;
          }
