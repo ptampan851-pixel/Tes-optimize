@@ -1,0 +1,143 @@
+--- a/runtime/src/nnsdk/nvn/executor.cpp
++++ b/runtime/src/nnsdk/nvn/executor.cpp
+@@ -1618,2 +1618,7 @@
+     uint64_t pipelines_created_ = 0, pipelines_saved_ = 0, last_pipeline_frame_ = 0;
++    // Atomic counters for pipeline creation routing diagnostics.
++    std::atomic<uint64_t> prof_pipe_async_queued_{0}, prof_pipe_sync_total_{0}, prof_pipe_sync_disabled_{0},
++        prof_pipe_sync_per_stage_{0}, prof_pipe_sync_skip_gs_{0}, prof_pipe_sync_nonrecurring_{0},
++        prof_pipe_sync_retry_{0}, prof_pipe_sync_known_{0}, prof_pipe_sync_unrecordable_{0},
++        prof_pipe_unrec_count_check_{0}, prof_pipe_unrec_base_key_{0}, prof_pipe_unrec_variant_key_{0};
+     // Perfil: pipelines creadas desde el último informe y lo que tardó el driver (en NvnSubmit, con el frame parado).
+@@ -2389,2 +2394,3 @@
+         VkRenderPass rp = VK_NULL_HANDLE;
++        std::chrono::steady_clock::time_point queued_at{};
+     };
+@@ -2402,3 +2408,9 @@
+     bool separate_tables_ = true;  // read_flags (<datos>/no_split_tables: un array, como antes): StageBindings::combined_textures
+-    std::atomic<uint64_t> prof_async_ns_{0};                // driver en los hilos (para pipelines.bin y el log)
++    std::atomic<uint64_t> prof_async_ns_{0};                // async driver pipeline creation duration
++    std::atomic<uint64_t> prof_async_queue_wait_ns_{0};
++    std::atomic<uint64_t> prof_async_jobs_{0};
++    std::atomic<uint64_t> prof_async_driver_calls_{0};
++    std::atomic<uint64_t> prof_async_success_{0};
++    std::atomic<uint64_t> prof_async_failed_{0};
++    std::atomic<uint64_t> prof_async_abandoned_{0};
+     void async_loop();
+@@ -7361,3 +7373,7 @@
+     // (not with the draw count check: the warm-up builds from the SPIR-V cache, which keeps the stage without it)
+-    bool recordable = !(st_.stages[static_cast<int>(Stage::Vertex)] && st_.stages[static_cast<int>(Stage::Vertex)]->count_check);
++    const bool unrec_count_check =
++        st_.stages[static_cast<int>(Stage::Vertex)] && st_.stages[static_cast<int>(Stage::Vertex)]->count_check;
++    bool unrec_base_key = false;
++    bool unrec_variant_key = false;
++    bool recordable = !unrec_count_check;
+     for (int s = 0; s < kStages; s++) {
+@@ -7365,3 +7381,5 @@
+         rec.base[s] = st_.stages[s]->cache_key;
+-        recordable &= (st_.stages[s]->cache_key.a | st_.stages[s]->cache_key.b) != 0;
++        const bool base_key_valid = (st_.stages[s]->cache_key.a | st_.stages[s]->cache_key.b) != 0;
++        unrec_base_key |= !base_key_valid;
++        recordable &= base_key_valid;
+         if (key.skip_gs && s == static_cast<int>(Stage::Geometry)) continue;
+@@ -7409,3 +7427,5 @@
+         rec.module[s] = v.cache_key;
+-        recordable &= (v.cache_key.a | v.cache_key.b) != 0;
++        const bool variant_key_valid = (v.cache_key.a | v.cache_key.b) != 0;
++        unrec_variant_key |= !variant_key_valid;
++        recordable &= variant_key_valid;
+     }
+@@ -7421,2 +7441,3 @@
+         job.rp = rp;
++        job.queued_at = std::chrono::steady_clock::now();
+         if (!async_started_) {
+@@ -7435,2 +7456,3 @@
+         }
++        prof_pipe_async_queued_.fetch_add(1, std::memory_order_relaxed);
+         hud::shader_queued();
+@@ -7440,2 +7462,21 @@
+         return VK_NULL_HANDLE;
++    }
++    prof_pipe_sync_total_.fetch_add(1, std::memory_order_relaxed);
++    if (known && !retry) {
++        prof_pipe_sync_known_.fetch_add(1, std::memory_order_relaxed);
++    } else if (retry) {
++        prof_pipe_sync_retry_.fetch_add(1, std::memory_order_relaxed);
++    } else if (!async_pipelines_) {
++        prof_pipe_sync_disabled_.fetch_add(1, std::memory_order_relaxed);
++    } else if (per_stage_keys_) {
++        prof_pipe_sync_per_stage_.fetch_add(1, std::memory_order_relaxed);
++    } else if (key.skip_gs) {
++        prof_pipe_sync_skip_gs_.fetch_add(1, std::memory_order_relaxed);
++    } else if (!rp_recurring_) {
++        prof_pipe_sync_nonrecurring_.fetch_add(1, std::memory_order_relaxed);
++    } else if (!recordable) {
++        prof_pipe_sync_unrecordable_.fetch_add(1, std::memory_order_relaxed);
++        if (unrec_count_check) prof_pipe_unrec_count_check_.fetch_add(1, std::memory_order_relaxed);
++        if (unrec_base_key) prof_pipe_unrec_base_key_.fetch_add(1, std::memory_order_relaxed);
++        if (unrec_variant_key) prof_pipe_unrec_variant_key_.fetch_add(1, std::memory_order_relaxed);
+     }
+@@ -11491,2 +11532,5 @@
+         }
++        const uint64_t queue_wait_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
++            std::chrono::steady_clock::now() - job.queued_at).count());
++        prof_async_queue_wait_ns_.fetch_add(queue_wait_ns, std::memory_order_relaxed);
+         VkShaderModule modules[kStages] = {};
+@@ -11503,9 +11547,9 @@
+         VkResult r = VK_ERROR_INITIALIZATION_FAILED;
+-        const auto t0 = std::chrono::steady_clock::now();
++        uint64_t ns = 0;
+         if (ok) {
+             std::shared_lock cache_lock(pipeline_cache_lock_);
++            const auto t0 = std::chrono::steady_clock::now();
+             r = make_graphics_pipeline(job.rec.key, modules, job.inputs, job.layout, job.rp, pipeline_cache_, p);
+-        }
+-        const uint64_t ns =
+-            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
++            ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
++        }
+         for (VkShaderModule m : modules)
+@@ -11540,3 +11584,10 @@
+         if (p) record_pipeline(job.rec);
+-        if (ok) prof_async_ns_.fetch_add(ns, std::memory_order_relaxed);
++        prof_async_jobs_.fetch_add(1, std::memory_order_relaxed);
++        if (ok) {
++            prof_async_ns_.fetch_add(ns, std::memory_order_relaxed);
++            prof_async_driver_calls_.fetch_add(1, std::memory_order_relaxed);
++        }
++        if (abandoned) prof_async_abandoned_.fetch_add(1, std::memory_order_relaxed);
++        else if (ok && r == VK_SUCCESS && p) prof_async_success_.fetch_add(1, std::memory_order_relaxed);
++        else prof_async_failed_.fetch_add(1, std::memory_order_relaxed);
+     }
+@@ -12021,4 +12072,33 @@
+                 static_cast<unsigned long long>(prof_warm_waits_), warm_ready);
++        const uint64_t async_jobs = prof_async_jobs_.exchange(0, std::memory_order_relaxed);
++        const uint64_t async_wait_ns = prof_async_queue_wait_ns_.exchange(0, std::memory_order_relaxed);
++        const uint64_t async_driver_ns = prof_async_ns_.exchange(0, std::memory_order_relaxed);
++        const uint64_t async_driver_calls = prof_async_driver_calls_.exchange(0, std::memory_order_relaxed);
++        const uint64_t async_success = prof_async_success_.exchange(0, std::memory_order_relaxed);
++        const uint64_t async_failed = prof_async_failed_.exchange(0, std::memory_order_relaxed);
++        const uint64_t async_abandoned = prof_async_abandoned_.exchange(0, std::memory_order_relaxed);
++        NVN_LOG("pipeline async: %llu jobs; avg queue wait %.2f ms; avg driver call %.2f ms (%llu calls); "
++                "%llu success, %llu failed, %llu abandoned\n",
++                static_cast<unsigned long long>(async_jobs),
++                async_jobs ? async_wait_ns / 1e6 / double(async_jobs) : 0.0,
++                async_driver_calls ? async_driver_ns / 1e6 / double(async_driver_calls) : 0.0,
++                static_cast<unsigned long long>(async_driver_calls), static_cast<unsigned long long>(async_success),
++                static_cast<unsigned long long>(async_failed), static_cast<unsigned long long>(async_abandoned));
+         prof_pipelines_logged_ = pipelines_created_;
+         prof_pipeline_us_ = 0;
++        NVN_LOG("pipeline routing: async queued %llu | sync total %llu (disabled %llu, per-stage %llu, skip-GS %llu, "
++                "non-recurring %llu, retry %llu, known %llu, unrecordable %llu [count-check %llu, base-key %llu, "
++                "variant-key %llu])\n",
++                static_cast<unsigned long long>(prof_pipe_async_queued_.exchange(0, std::memory_order_relaxed)),
++                static_cast<unsigned long long>(prof_pipe_sync_total_.exchange(0, std::memory_order_relaxed)),
++                static_cast<unsigned long long>(prof_pipe_sync_disabled_.exchange(0, std::memory_order_relaxed)),
++                static_cast<unsigned long long>(prof_pipe_sync_per_stage_.exchange(0, std::memory_order_relaxed)),
++                static_cast<unsigned long long>(prof_pipe_sync_skip_gs_.exchange(0, std::memory_order_relaxed)),
++                static_cast<unsigned long long>(prof_pipe_sync_nonrecurring_.exchange(0, std::memory_order_relaxed)),
++                static_cast<unsigned long long>(prof_pipe_sync_retry_.exchange(0, std::memory_order_relaxed)),
++                static_cast<unsigned long long>(prof_pipe_sync_known_.exchange(0, std::memory_order_relaxed)),
++                static_cast<unsigned long long>(prof_pipe_sync_unrecordable_.exchange(0, std::memory_order_relaxed)),
++                static_cast<unsigned long long>(prof_pipe_unrec_count_check_.exchange(0, std::memory_order_relaxed)),
++                static_cast<unsigned long long>(prof_pipe_unrec_base_key_.exchange(0, std::memory_order_relaxed)),
++                static_cast<unsigned long long>(prof_pipe_unrec_variant_key_.exchange(0, std::memory_order_relaxed)));
