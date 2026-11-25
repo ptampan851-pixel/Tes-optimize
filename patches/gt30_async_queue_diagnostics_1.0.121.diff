@@ -41,6 +41,20 @@
          VkShaderModule modules[kStages] = {};
          nvnshader::Translated translated[kStages];  // (si el driver la rechaza, su SPIR-V a pipelines_fallidas)
          bool ok = true;
+@@ -11500,12 +11500,13 @@
+         }
+         VkPipeline p = VK_NULL_HANDLE;
+         VkResult r = VK_ERROR_INITIALIZATION_FAILED;
+-        const auto t0 = std::chrono::steady_clock::now();
++        uint64_t ns = 0;
+         if (ok) {
+             std::shared_lock cache_lock(pipeline_cache_lock_);
++            const auto t0 = std::chrono::steady_clock::now();
+             r = make_graphics_pipeline(job.rec.key, modules, job.inputs, job.layout, job.rp, pipeline_cache_, p);
++            ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+         }
+-        const uint64_t ns =
+-            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
 @@ -11571,7 +11582,14 @@
              p = VK_NULL_HANDLE;
          }
